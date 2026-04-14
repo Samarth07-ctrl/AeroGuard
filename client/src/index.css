@@ -1,0 +1,113 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+/* ─── Theme Extensions (TW v4) ─── */
+@theme {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  --color-cyber-400: #22d3ee;
+  --color-cyber-500: #06b6d4;
+  --color-cyber-600: #0891b2;
+
+  --animate-pulse-glow: pulseGlow 2s ease-in-out infinite;
+  --animate-radar-ping: radarPing 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+  --animate-float: float 6s ease-in-out infinite;
+
+  @keyframes pulseGlow {
+    0%, 100% { box-shadow: 0 0 8px rgba(34, 211, 238, 0.4); opacity: 1; }
+    50% { box-shadow: 0 0 24px rgba(34, 211, 238, 0.8); opacity: 0.8; }
+  }
+  @keyframes radarPing {
+    0% { transform: scale(1); opacity: 1; }
+    75%, 100% { transform: scale(2.5); opacity: 0; }
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-10px); }
+  }
+}
+
+/* ─── Base ─── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+
+body {
+  background-color: #020617; /* slate-950 */
+  color: #f1f5f9;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+/* ─── Grid BG ─── */
+.grid-bg {
+  background-size: 48px 48px;
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,0.015) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.015) 1px, transparent 1px);
+}
+
+/* ─── Card Glass ─── */
+.card-glass {
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ─── Noise overlay ─── */
+.noise::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.02;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+/* ─── Cyan focus ring ─── */
+.focus-cyan:focus {
+  outline: none;
+  border-color: rgba(34, 211, 238, 0.5) !important;
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15), 0 0 20px rgba(34, 211, 238, 0.08);
+}
+
+/* ─── OTP caret ─── */
+.otp-caret {
+  caret-color: #22d3ee;
+}
+
+/* ─── Mapbox overrides ─── */
+.mapboxgl-popup-content {
+  padding: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  border-radius: 12px !important;
+}
+.mapboxgl-popup-tip { display: none !important; }
+.mapboxgl-popup-close-button { display: none !important; }
+.mapboxgl-ctrl-attrib { display: none !important; }
+
+/* ─── Progress shimmer ─── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer-bar {
+  background: linear-gradient(90deg, transparent 0%, rgba(34,211,238,0.25) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ─── Soft Pulse ─── */
+@keyframes softPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
