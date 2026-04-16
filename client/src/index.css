@@ -35,8 +35,8 @@
 }
 
 body {
-  background-color: #020617; /* slate-950 */
-  color: #f1f5f9;
+  background-color: #f9fafb;
+  color: #111827;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -110,4 +110,18 @@ body {
 @keyframes softPulse {
   0%, 100% { opacity: 0.6; }
   50% { opacity: 1; }
+}
+
+/* ─── Prediction Zone Pulse ─── */
+@keyframes predictionPulse {
+  0%, 100% {
+    opacity: 0.65;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.prediction-pulse {
+  animation: predictionPulse 1.8s ease-in-out infinite;
 }

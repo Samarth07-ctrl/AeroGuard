@@ -1,15 +1,33 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import axios from 'axios';
-import Map, { Marker, NavigationControl, Popup } from 'react-map-gl/mapbox';
-import 'mapbox-gl/dist/mapbox-gl.css';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import {
   UploadCloud, Loader2, HardDrive, FileArchive, Zap,
   Activity, ShieldCheck, Radio, CheckCircle2, Target, AlertTriangle
 } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
-const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN || '';
+
+// Custom Leaflet icon factory
+const createIcon = (color) => L.divIcon({
+  className: '',
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
+  popupAnchor: [0, -16],
+  html: `<div style="position:relative;width:28px;height:28px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.25;animation:ping 2s cubic-bezier(0,0,0.2,1) infinite;"></div><div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 0 12px ${color}80;"></div></div><style>@keyframes ping{75%,100%{transform:scale(2);opacity:0}}</style>`
+});
+
+// Helper to recenter map
+function MapRecenter({ center, zoom }) {
+  const map = useMap();
+  useEffect(() => {
+    if (center) map.flyTo(center, zoom || 16, { duration: 1.5 });
+  }, [center, zoom, map]);
+  return null;
+}
 
 // ── Severity color config ──
 const SEV = {
@@ -24,23 +42,26 @@ export default function Dashboard({ session, setSession }) {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [dragActive, setDragActive] = useState(false);
-  const [selectedPin, setSelectedPin] = useState(null);
+  const [, setSelectedPin] = useState(null);
   const fileRef = useRef(null);
 
   const results = session.results || [];
   const hasResults = session.status === 'completed' && results.length > 0;
 
-  // ── Map viewport ──
-  const defaultCenter = results.length > 0
-    ? { longitude: results[0].long, latitude: results[0].lat }
-    : { longitude: -71.0589, latitude: 42.3601 };
+  // Keep active session ID available for other views (e.g. DroneDashboard)
+  useEffect(() => {
+    if (session.sessionId) {
+      localStorage.setItem('activeSessionId', session.sessionId);
+    }
+  }, [session.sessionId]);
 
-  const [viewState, setViewState] = useState({
-    ...defaultCenter,
-    zoom: 14,
-    pitch: 45,
-    bearing: -15,
-  });
+  // ── Map center ──
+  const defaultCenter = results.length > 0
+    ? [results[0].lat, results[0].long]
+    : [18.5204, 73.8567];
+
+  const [mapCenter, setMapCenter] = useState(null);
+  const [mapZoom, setMapZoom] = useState(16);
 
   // ── Poll for processing completion ──
   useEffect(() => {
@@ -63,12 +84,8 @@ export default function Dashboard({ session, setSession }) {
               setSession(prev => ({ ...prev, status: 'completed', results: res.data.results }));
               // Re-center map on first result
               if (res.data.results?.[0]) {
-                setViewState(v => ({
-                  ...v,
-                  longitude: res.data.results[0].long,
-                  latitude: res.data.results[0].lat,
-                  zoom: 15,
-                }));
+                setMapCenter([res.data.results[0].lat, res.data.results[0].long]);
+                setMapZoom(17);
               }
             }, 600);
             clearInterval(interval);
@@ -199,7 +216,8 @@ export default function Dashboard({ session, setSession }) {
                         transition={{ delay: i * 0.1 }}
                         onClick={() => {
                           setSelectedPin(r);
-                          setViewState(v => ({ ...v, longitude: r.long, latitude: r.lat, zoom: 16 }));
+                          setMapCenter([r.lat, r.long]);
+                          setMapZoom(17);
                         }}
                         className="p-3 bg-white/[0.02] border border-white/[0.05] rounded-xl cursor-pointer hover:bg-white/[0.04] hover:border-white/[0.08] transition-all group">
                         <div className="flex items-center justify-between mb-1.5">
@@ -272,12 +290,12 @@ export default function Dashboard({ session, setSession }) {
           </div>
         </div>
 
-        {/* ── RIGHT: Mapbox Satellite ── */}
+        {/* ── RIGHT: Leaflet Satellite Map ── */}
         <div className="flex-1 relative">
 
           {/* Hotspot badges floating on top of map */}
           {hasResults && (
-            <div className="absolute top-4 left-4 z-10 flex items-center gap-2">
+            <div className="absolute top-4 left-4 z-[1000] flex items-center gap-2">
               <div className="card-glass px-3 py-2 rounded-lg flex items-center gap-2 noise">
                 <Target className="w-4 h-4 text-cyan-400" />
                 <span className="text-xs font-bold tracking-tight">Detection Heatmap</span>
@@ -289,81 +307,46 @@ export default function Dashboard({ session, setSession }) {
             </div>
           )}
 
-          {!MAPBOX_TOKEN ? (
-            /* Missing token overlay */
-            <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/90 z-20 p-6">
-              <div className="card-glass rounded-xl p-8 max-w-sm text-center noise">
-                <AlertTriangle className="w-9 h-9 text-amber-400 mx-auto mb-4" />
-                <h3 className="font-bold text-base mb-2">Mapbox Token Required</h3>
-                <p className="text-zinc-400 text-xs mb-4">
-                  Set your token in <code className="text-cyan-400 bg-white/[0.04] px-1.5 py-0.5 rounded text-[11px] font-mono">client/.env</code>
-                </p>
-                <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 text-left font-mono text-[11px] text-zinc-500">
-                  VITE_MAPBOX_TOKEN="pk.your_token"
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          <Map
-            {...viewState}
-            onMove={(evt) => setViewState(evt.viewState)}
-            mapboxAccessToken={MAPBOX_TOKEN}
-            mapStyle="mapbox://styles/mapbox/satellite-streets-v12"
+          <MapContainer
+            center={defaultCenter}
+            zoom={16}
             style={{ width: '100%', height: '100%' }}
-            attributionControl={false}
+            zoomControl={false}
           >
-            <NavigationControl position="top-right" showCompass />
+            <TileLayer
+              url="http://{s}.google.com/vt/lyrs=s,h&x={x}&y={y}&z={z}"
+              subdomains={['mt0','mt1','mt2','mt3']}
+              attribution="&copy; Google Maps"
+              maxZoom={20}
+            />
+            {mapCenter && <MapRecenter center={mapCenter} zoom={mapZoom} />}
 
             {/* ── Pulsating Disease Markers ── */}
             {results.map((point, i) => {
               const sev = SEV[point.severity] || SEV.High;
               return (
-                <Marker key={i} longitude={point.long} latitude={point.lat} anchor="center"
-                  onClick={(e) => { e.originalEvent.stopPropagation(); setSelectedPin(point); }}>
-                  <div className="relative flex items-center justify-center cursor-pointer" style={{ width: 40, height: 40 }}>
-                    {/* Radar ring */}
-                    <div className="absolute inset-0 rounded-full opacity-40 animate-ping"
-                      style={{ border: `2px solid ${sev.color}`, animationDuration: '2s', animationDelay: `${i * 0.3}s` }} />
-                    {/* Core pulsating dot */}
-                    <div className="w-4 h-4 rounded-full animate-pulse border-2 border-white shadow-lg"
-                      style={{ background: sev.color, boxShadow: `0 0 14px ${sev.color}80, 0 0 28px ${sev.color}40` }} />
-                  </div>
+                <Marker key={i} position={[point.lat, point.long]}
+                  icon={createIcon(sev.color)}
+                  eventHandlers={{ click: () => setSelectedPin(point) }}>
+                  <Popup>
+                    <div style={{ background: '#0a0a0a', borderRadius: '12px', padding: '14px', minWidth: '200px', border: '1px solid rgba(255,255,255,0.08)', fontFamily: "'Inter', sans-serif" }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', paddingBottom: '8px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: sev.color, boxShadow: `0 0 8px ${sev.color}80` }}></div>
+                        <span style={{ fontWeight: 700, fontSize: '13px', color: '#e4e4e7' }}>{point.disease}</span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                        <span style={{ fontSize: '10px', color: '#71717a', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Severity</span>
+                        <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', color: sev.color }}>{sev.label}</span>
+                      </div>
+                      <div style={{ fontSize: '9px', fontFamily: 'monospace', color: '#71717a', background: 'rgba(255,255,255,0.02)', padding: '6px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.04)' }}>
+                        📍 {point.lat.toFixed(5)}, {point.long.toFixed(5)}
+                      </div>
+                    </div>
+                  </Popup>
                 </Marker>
               );
             })}
-
-            {/* ── Popup on pin click ── */}
-            {selectedPin && (
-              <Popup longitude={selectedPin.long} latitude={selectedPin.lat} anchor="bottom"
-                onClose={() => setSelectedPin(null)} closeButton={false} closeOnClick maxWidth="240px">
-                <div className="bg-zinc-950/95 backdrop-blur-xl border border-white/[0.06] rounded-xl p-3.5 min-w-[200px]"
-                  style={{ fontFamily: "'Inter', sans-serif" }}>
-                  <div className="flex items-center gap-2 mb-2.5 pb-2 border-b border-white/[0.05]">
-                    <div className="w-2 h-2 rounded-full"
-                      style={{ background: (SEV[selectedPin.severity] || SEV.High).color,
-                        boxShadow: `0 0 8px ${(SEV[selectedPin.severity] || SEV.High).color}80` }} />
-                    <span className="font-bold text-[13px] text-zinc-100">{selectedPin.disease}</span>
-                  </div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Severity</span>
-                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border bg-white/[0.02]"
-                      style={{ color: (SEV[selectedPin.severity] || SEV.High).color,
-                        borderColor: (SEV[selectedPin.severity] || SEV.High).color + '30' }}>
-                      {(SEV[selectedPin.severity] || SEV.High).label}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Type</span>
-                    <span className="text-[10px] text-zinc-400">Crop Disease</span>
-                  </div>
-                  <div className="text-[9px] text-zinc-600 font-mono bg-white/[0.02] p-1.5 rounded border border-white/[0.03]">
-                    📍 {selectedPin.lat.toFixed(5)}, {selectedPin.long.toFixed(5)}
-                  </div>
-                </div>
-              </Popup>
-            )}
-          </Map>
+          </MapContainer>
         </div>
       </div>
     </div>

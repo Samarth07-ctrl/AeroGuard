@@ -1,58 +1,83 @@
+const path = require('path');
+const crypto = require('crypto');
+const { exec } = require('child_process');
 const ScanSession = require('../models/ScanSession');
+const Farmer = require('../models/Farmer');
+const AnalysisSession = require('../models/AnalysisSession');
+const { extractGps } = require('../utils/extractGps');
 
-// ──────────────────────────────────────────
-// Mock C++ Engine
-// Simulates heavy image processing. After
-// 5 seconds, triggers /api/webhook/results
-// with dummy disease coordinate data.
-// ──────────────────────────────────────────
-const startCppEngine = (sessionId) => {
-  console.log(`[C++ WAITING] UI initiated upload for session ${sessionId.slice(0, 8)}...`);
-  console.log(`[WAITING] The frontend is now loading securely. Node.js is waiting for your C++ Visual Studio project to process the image and fire the Webhook...`);
-  // The React UI will now poll forever until the C++ Engine executes the real alert!
+const startCppEngine = (uploadId, imagePath) => {
+  const engineDir = path.resolve(__dirname, '../../AeroGuardEngine');
+  const enginePath = path.join(engineDir, 'build', 'Release', 'AeroGuardEngine.exe');
+  const absoluteImagePath = path.isAbsolute(imagePath)
+    ? imagePath
+    : path.resolve(__dirname, '..', imagePath);
+  const command = `"${enginePath}" "${absoluteImagePath}" "${uploadId}"`;
+
+  console.log(`[C++ START] uploadId=${uploadId.slice(0, 8)} file=${path.basename(imagePath)}`);
+  exec(command, { cwd: engineDir }, (error, stdout, stderr) => {
+    if (stdout?.trim()) console.log(`[C++ STDOUT]\n${stdout}`);
+    if (stderr?.trim()) console.error(`[C++ STDERR]\n${stderr}`);
+    if (error) { console.error(`[C++ ERROR] ${error.message}`); return; }
+    console.log(`[C++ DONE] uploadId=${uploadId.slice(0, 8)}`);
+  });
 };
 
-// ──────────────────────────────────────────
-// POST /api/upload
-// Secured route. Accepts .zip file via Multer.
-// body must include sessionId. Rejects 403
-// if isVerified is false. Saves to /uploads.
-// ──────────────────────────────────────────
 exports.uploadImage = async (req, res) => {
   try {
-    const { sessionId } = req.body;
+    const { sessionId, farmerId } = req.body;
 
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID is required' });
-    }
+    if (!sessionId) return res.status(400).json({ error: 'Session ID is required' });
 
     const session = await ScanSession.findOne({ sessionId });
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (!session.isVerified) return res.status(403).json({ error: 'Session not verified. Complete OTP first.' });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
+    // Unique uploadId per image — C++ engine and AnalysisSession use this, not the OTP sessionId
+    const uploadId = crypto.randomBytes(16).toString('hex');
 
-    if (!session.isVerified) {
-      return res.status(403).json({ error: 'Session not verified. Complete OTP handshake first.' });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    session.uploadPath = req.file.path;
     session.status = 'processing';
     await session.save();
 
-    console.log(`[UPLOAD] File saved: ${req.file.path} (${(req.file.size / 1024 / 1024).toFixed(2)} MB)`);
+    const farmer = farmerId
+      ? await Farmer.findOne({ farmerId })
+      : await Farmer.findOne({ email: session.farmerEmail });
 
-    // Trigger mock C++ processing pipeline
-    startCppEngine(sessionId);
+    if (!farmer) {
+      return res.status(400).json({ error: 'Farmer not found for this session. Re-verify OTP.' });
+    }
+
+    // ── BULLETPROOF EXIF GPS EXTRACTION ──
+    // Reads real drone GPS from EXIF. Falls back to Pune coords if missing.
+    // Never throws — always returns valid lat/lon.
+    const absoluteImagePath = path.resolve(req.file.path);
+    const { lat: baseLat, lon: baseLon, source: gpsSource } = await extractGps(absoluteImagePath);
+    console.log(`[GPS] uploadId=${uploadId.slice(0, 8)} source=${gpsSource} → ${baseLat}, ${baseLon}`);
+
+    // Create a fresh AnalysisSession with the verified GPS base coordinates
+    await AnalysisSession.create({
+      sessionId: uploadId,
+      farmerId:  farmer._id,
+      imagePath: req.file.path,
+      baseLat,
+      baseLon,
+      gpsSource,
+      diseases:  []
+    });
+
+    console.log(`[UPLOAD] uploadId=${uploadId.slice(0, 8)} farmer=${farmer.email}`);
+
+    // Pass uploadId to C++ — all webhooks will reference this as sessionId
+    startCppEngine(uploadId, req.file.path);
 
     return res.status(200).json({
       message: 'Upload successful, processing started',
-      sessionId,
-      filePath: req.file.path
+      sessionId:     uploadId,
+      authSessionId: sessionId,
+      farmerId:      farmer.farmerId,
+      filePath:      req.file.path,
+      gps:           { lat: baseLat, lon: baseLon, source: gpsSource },
     });
 
   } catch (error) {

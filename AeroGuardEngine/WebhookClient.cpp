@@ -9,11 +9,12 @@ WebhookClient::WebhookClient(const std::string& url) {
     serverUrl = url;
 }
 
-bool WebhookClient::sendAlert(const std::string& farmerId, const std::string& disease, double lat, double lon, const std::string& severity, const std::string& pesticide) {
+bool WebhookClient::sendAlert(const std::string& sessionId, const std::string& farmerId, const std::string& disease, double lat, double lon, const std::string& severity, const std::string& pesticide) {
     
     // 1. Serialize the exact JSON structure our Node.js/Flutter stack expects
     json payload = {
         {"type", "DISEASE_ALERT"},
+        {"sessionId", sessionId},
         {"farmer_id", farmerId},
         {"disease", disease},
         {"lat", lat},

@@ -1,0 +1,21 @@
+names:
+- Black_knot
+- Chlorosis
+- Dog_vomit_slime_mold
+- Elderberry_rust
+- Golden_canker
+- Gymnosporangium_Rusts
+- Powdery Mildew
+- Sooty Mold
+- Tar_Spot
+- peach_leaf_curl
+nc: 10
+roboflow:
+  license: CC BY 4.0
+  project: plant-disease-6ex9f
+  url: https://universe.roboflow.com/capstone-u7skk/plant-disease-6ex9f/dataset/1
+  version: 1
+  workspace: capstone-u7skk
+test: ../test/images
+train: ../train/images
+val: ../valid/images

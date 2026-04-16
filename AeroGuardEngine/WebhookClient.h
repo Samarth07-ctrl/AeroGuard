@@ -10,7 +10,8 @@ public:
     WebhookClient(const std::string& url);
 
     // The payload function perfectly matched to our Flutter App UI
-    bool sendAlert(const std::string& farmerId, 
+    bool sendAlert(const std::string& sessionId,
+                   const std::string& farmerId,
                    const std::string& disease, 
                    double lat, 
                    double lon, 

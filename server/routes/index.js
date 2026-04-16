@@ -38,16 +38,9 @@ const upload = multer({
 // ──────────────────────────────────────────
 // Controllers
 // ──────────────────────────────────────────
-const sessionController = require('../controllers/sessionController');
 const uploadController = require('../controllers/uploadController');
 const webhookController = require('../controllers/webhookController');
 const ScanSession = require('../models/ScanSession');
-
-// ──────────────────────────────────────────
-// Auth Routes
-// ──────────────────────────────────────────
-router.post('/auth/request-otp', sessionController.requestOtp);
-router.post('/auth/verify-otp', sessionController.verifyOtp);
 
 // ──────────────────────────────────────────
 // Session Status (for frontend polling)
