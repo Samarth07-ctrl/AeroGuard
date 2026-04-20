@@ -108,9 +108,15 @@ app.post('/api/alerts', async (req, res) => {
                     try {
                         analysisSession = await AnalysisSession.create({
                             sessionId,
-                            farmerId: farmer._id,
-                            imagePath: scanSession?.uploadPath || '',
-                            diseases: []
+                            farmerId:    farmer._id,
+                            farmerEmail: farmer.email,
+                            imagePath:   scanSession?.uploadPath || '',
+                            location: {
+                                type:        'Point',
+                                coordinates: [Number(baseLon), Number(baseLat)],
+                            },
+                            isVerified: false,
+                            diseases:   []
                         });
                         console.log(`   ✅ DB: Created AnalysisSession on-the-fly for ${sessionId.slice(0, 8)}`);
                     } catch (createErr) {
@@ -144,15 +150,33 @@ app.post('/api/alerts', async (req, res) => {
                         .includes((d.name || '').toLowerCase())
                 );
                 cleaned.push({
-                    name: payload.disease,
-                    severity: payload.severity,
+                    name:       payload.disease,
+                    severity:   payload.severity,
                     confidence: confidence,
-                    lat: shiftedLat,
-                    lon: shiftedLon
+                    lat:        Number(shiftedLat),
+                    lon:        Number(shiftedLon)
                 });
+
+                // Derive farmerEmail from ScanSession if not already on the document
+                const emailToSave = analysisSession.farmerEmail
+                    || scanSession?.farmerEmail
+                    || '';
+
                 await AnalysisSession.updateOne(
                     { sessionId },
-                    { $set: { diseases: cleaned } }
+                    {
+                        $set: {
+                            diseases:    cleaned,
+                            isVerified:  true,
+                            farmerEmail: emailToSave,
+                            // Keep GeoJSON location in sync with base coords
+                            location: {
+                                type:        'Point',
+                                coordinates: [Number(analysisSession.baseLon || shiftedLon),
+                                              Number(analysisSession.baseLat || shiftedLat)],
+                            },
+                        },
+                    }
                 );
                 console.log(`   ✅ DB: diseases[$set] on session ${sessionId.slice(0, 8)} (${cleaned.length} total) GPS-source=${analysisSession.gpsSource ?? 'unknown'}`);
             } else {
@@ -239,14 +263,19 @@ app.get('/api/alerts', async (req, res) => {
 app.get('/api/workspaces', async (req, res) => {
     try {
         const ScanSession = require('./models/ScanSession');
-        const sessions = await ScanSession.find({ isVerified: true })
+        // Include both verified sessions AND pending invites (so QR codes show up after restart)
+        const sessions = await ScanSession.find({
+            $or: [{ isVerified: true }, { appLinkStatus: 'pending_app_install' }]
+        })
             .sort({ createdAt: -1 })
-            .select('sessionId farmerEmail createdAt');
+            .select('sessionId farmerEmail createdAt qrToken appLinkStatus isVerified');
 
         const workspaces = sessions.map((s) => ({
-            email: s.farmerEmail,
-            sessionId: s.sessionId,
-            verifiedAt: s.createdAt,
+            email:         s.farmerEmail,
+            sessionId:     s.sessionId,
+            verifiedAt:    s.createdAt,
+            qrToken:       s.qrToken       || null,
+            appLinkStatus: s.appLinkStatus || (s.isVerified ? 'app_linked' : 'pending_app_install'),
         }));
 
         return res.status(200).json(workspaces);
@@ -352,10 +381,81 @@ app.get('/api/risk-prediction', authMiddleware, analysisController.getRiskPredic
 const clusterController = require('./controllers/clusterController');
 app.get('/api/clusters/:sessionId', clusterController.getSessionClusters);
 
+// ══════════════════════════════════════════════════
+// GET /api/farmer-detections — Mobile App Query
+// Returns all verified detections for a farmer email.
+// Mobile app calls: GET /api/farmer-detections?email=farmer@example.com
+// ══════════════════════════════════════════════════
+app.get('/api/farmer-detections', async (req, res) => {
+    try {
+        const { email } = req.query;
+        if (!email) return res.status(400).json({ error: 'email query param is required' });
+
+        const AnalysisSession = require('./models/AnalysisSession');
+        const SAFE_NAMES = [
+            'healthy field / no anomalies found',
+            'no disease detected / invalid image',
+        ];
+
+        const sessions = await AnalysisSession.find({
+            farmerEmail: String(email).trim().toLowerCase(),
+            isVerified:  true,
+        })
+            .sort({ createdAt: -1 })
+            .limit(100)
+            .lean();
+
+        const detections = sessions.flatMap((s) =>
+            (s.diseases || [])
+                .filter((d) => {
+                    const sev  = (d.severity || '').toLowerCase();
+                    const name = (d.name || '').toLowerCase();
+                    return sev !== 'safe' && !SAFE_NAMES.some(n => name.includes(n));
+                })
+                .map((d) => ({
+                    sessionId:    s.sessionId,
+                    batchId:      s.batchId,
+                    imageUrl:     s.imageUrl,
+                    farmerEmail:  s.farmerEmail,
+                    disease:      d.name,
+                    severity:     d.severity,
+                    confidence:   d.confidence,
+                    lat:          Number(d.lat),
+                    lon:          Number(d.lon),
+                    riskScore:    d.riskScore,
+                    riskRadius:   d.riskRadius,
+                    spreadRadius: d.spreadRadius,
+                    createdAt:    s.createdAt,
+                }))
+        );
+
+        return res.status(200).json({ email, count: detections.length, detections });
+    } catch (err) {
+        console.error('[FARMER-DETECTIONS] error:', err);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Database Connection
 mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/aeroguard')
-  .then(() => {
-    console.log('Connected to MongoDB');
+  .then(async () => {
+    const dbName = mongoose.connection.db.databaseName;
+    console.log(`Connected to MongoDB — database: "${dbName}"`);
+
+    // Startup diagnostic: show how many OTP sessions exist
+    try {
+      const ScanSession = require('./models/ScanSession');
+      const total = await ScanSession.countDocuments();
+      const unverified = await ScanSession.countDocuments({ isVerified: false });
+      console.log(`📊 ScanSessions in "${dbName}": ${total} total, ${unverified} unverified`);
+      if (total > 0) {
+        const latest = await ScanSession.findOne().sort({ createdAt: -1 }).lean();
+        console.log(`   Latest: email="${latest.farmerEmail}" otp="${latest.otpCode}" verified=${latest.isVerified} session=${latest.sessionId?.slice(0,8)}`);
+      }
+    } catch (diagErr) {
+      console.warn('Startup diagnostic skipped:', diagErr.message);
+    }
+
     app.listen(PORT, () => {
       console.log(`\n🌐 AeroGuard Command Center running on http://localhost:${PORT}`);
       console.log(`📡 POST /api/alerts — Waiting for C++ Engine webhooks...`);

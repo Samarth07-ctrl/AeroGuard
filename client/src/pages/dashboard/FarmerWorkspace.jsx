@@ -51,12 +51,14 @@ export default function FarmerWorkspace() {
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [dragActive, setDragActive] = useState(false);
-  const [activeUploadId, setActiveUploadId] = useState(null); // uploadId from last upload
+  const [activeUploadId, setActiveUploadId] = useState(null);
+  const [batchProgress, setBatchProgress] = useState(null); // bulk batch progress
   const fileRef = useRef(null);
 
   const [weather, setWeather] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [clusterData, setClusterData] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -75,32 +77,62 @@ export default function FarmerWorkspace() {
 
     const poll = async () => {
       try {
-        // Poll the active uploadId if we just uploaded, otherwise poll by OTP sessionId
-        // GET /api/alerts merges DB + live in-memory
-        const pollId = activeUploadId || sessionId;
-        const res = await fetch(`${API}/alerts?sessionId=${encodeURIComponent(pollId)}`);
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) setAlerts(data);
-      } catch { /* silent */ }
+        // Fetch all analysis sessions for this farmer to get ALL their detections
+        const sessionsRes = await axios.get(`${API}/analysis-sessions/session/${sessionId}`);
+        const sessions = sessionsRes.data || [];
+        
+        // Extract all diseases from all sessions
+        const allAlerts = [];
+        for (const session of (Array.isArray(sessions) ? sessions : [])) {
+          for (const disease of (session.diseases || [])) {
+            // Skip safe/healthy sentinels
+            const sev = (disease.severity || '').toLowerCase();
+            const name = (disease.name || '').toLowerCase();
+            if (sev === 'safe' || name.includes('healthy') || name.includes('no disease') || name.includes('no anomalies')) continue;
+            if (!disease.lat || !disease.lon) continue;
+            
+            allAlerts.push({
+              sessionId: session.sessionId,
+              disease: disease.name,
+              lat: disease.lat,
+              lon: disease.lon,
+              long: disease.lon,
+              severity: disease.severity,
+              confidence: disease.confidence,
+              pesticide: null,
+            });
+          }
+        }
+        
+        // Always update — even if empty — to clear stale data
+        setAlerts(allAlerts);
+      } catch (err) {
+        console.error('[ALERTS] Fetch error:', err);
+      }
     };
 
     poll();
-    const iv = setInterval(poll, 4000);
+    const iv = setInterval(poll, 5000);
     return () => clearInterval(iv);
-  }, [sessionId, activeUploadId]);
+  }, [sessionId, refreshKey]);
 
   useEffect(() => {
     if (!sessionId) return;
     const fetchClusters = async () => {
       try {
-        const res = await axios.get(`${API}/clusters/${sessionId}`);
+        // Pass farmer email to cluster endpoint for direct lookup (avoids fallback chain)
+        const emailParam = farmer?.email ? `?email=${encodeURIComponent(farmer.email)}` : '';
+        const res = await axios.get(`${API}/clusters/${sessionId}${emailParam}`);
+        console.log(`[FarmerWorkspace] Fetched clusters:`, res.data?.totalDetections, 'detections');
         setClusterData(res.data);
-      } catch { /* silent */ }
+      } catch (err) {
+        console.error('[CLUSTERS] Fetch error:', err);
+      }
     };
     fetchClusters();
     const iv = setInterval(fetchClusters, 8000);
     return () => clearInterval(iv);
-  }, [sessionId]);
+  }, [sessionId, farmer?.email, refreshKey]);
 
   const handleDrag = useCallback((e) => {
     e.preventDefault();
@@ -119,18 +151,52 @@ export default function FarmerWorkspace() {
     if (!file) return;
     setUploading(true);
     setUploadMsg('');
+    setBatchProgress(null);
+
+    const isZip = file.name.toLowerCase().endsWith('.zip');
+    const endpoint = isZip ? `${API}/batch/upload` : `${API}/upload`;
+
     try {
       const form = new FormData();
       form.append('drone_data', file);
-      form.append('sessionId', sessionId); // OTP auth sessionId
-      const res = await axios.post(`${API}/upload`, form, {
+      form.append('sessionId', sessionId);
+
+      const res = await axios.post(endpoint, form, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      // Server returns a unique uploadId — use it for polling this specific upload
-      const uploadId = res.data.sessionId;
-      setActiveUploadId(uploadId);
-      setUploadMsg('Upload successful — C++ engine triggered.');
-      setFile(null);
+
+      if (isZip && res.data.batchId) {
+        // ── Bulk batch: start polling progress ──
+        const { batchId, totalImages } = res.data;
+        setBatchProgress({ batchId, status: 'queued', totalImages, processedImages: 0, message: 'Starting…' });
+        setUploadMsg('');
+        setFile(null);
+
+        // Poll /api/batch/:batchId/progress every 3s
+        const pollInterval = setInterval(async () => {
+          try {
+            const prog = await axios.get(`${API}/batch/${batchId}/progress`);
+            setBatchProgress(prog.data);
+            if (prog.data.status === 'completed' || prog.data.status === 'failed') {
+              clearInterval(pollInterval);
+              setActiveUploadId(batchId);
+              // Force immediate re-fetch of clusters and alerts
+              setRefreshKey((k) => k + 1);
+              // Dispatch a global event so MapPage auto-refreshes
+              window.dispatchEvent(new CustomEvent('aeroguard:batch-complete', { detail: { batchId } }));
+            }
+          } catch { /* silent */ }
+        }, 3000);
+
+      } else {
+        // ── Single image: existing flow ──
+        const uploadId = res.data.sessionId;
+        setActiveUploadId(uploadId);
+        setUploadMsg('Upload successful — C++ engine triggered.');
+        setFile(null);
+        // Force cluster re-fetch after a short delay (wait for C++ engine)
+        setTimeout(() => setRefreshKey((k) => k + 1), 5000);
+      }
     } catch (err) {
       setUploadMsg('Upload failed: ' + (err.response?.data?.error || err.message));
     } finally {
@@ -270,7 +336,47 @@ export default function FarmerWorkspace() {
               {uploadMsg}
             </p>
           )}
-        </div>
+
+          {/* ── Batch Progress Tracker ── */}
+          {batchProgress && (
+            <div className="mt-3 rounded-xl border border-green-100 bg-green-50/60 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-green-800">
+                  {batchProgress.status === 'completed' ? '✅ Batch Complete' :
+                   batchProgress.status === 'failed'    ? '❌ Batch Failed'   :
+                   '⚙️ Processing Batch…'}
+                </span>
+                <span className="text-[10px] font-mono text-gray-500">
+                  {batchProgress.processedImages}/{batchProgress.totalImages} images
+                </span>
+              </div>
+
+              {/* Progress bar */}
+              <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="h-full bg-green-500 rounded-full transition-all duration-500"
+                  style={{
+                    width: batchProgress.totalImages > 0
+                      ? `${Math.round((batchProgress.processedImages / batchProgress.totalImages) * 100)}%`
+                      : '0%'
+                  }}
+                />
+              </div>
+
+              <p className="text-[10px] text-gray-600 leading-relaxed">{batchProgress.message}</p>
+
+              {batchProgress.totalDetections > 0 && (
+                <p className="text-[10px] font-semibold text-red-600">
+                  🦠 {batchProgress.totalDetections} disease detections found
+                </p>
+              )}
+              {batchProgress.failedImages > 0 && (
+                <p className="text-[10px] text-amber-600">
+                  ⚠️ {batchProgress.failedImages} images failed (skipped)
+                </p>
+              )}
+            </div>
+          )}        </div>
 
         {/* Widget 2: Weather Intel */}
         <div className="rounded-3xl border border-gray-100 bg-white p-5 shadow-sm transition hover:shadow-md">

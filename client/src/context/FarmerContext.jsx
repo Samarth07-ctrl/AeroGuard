@@ -28,7 +28,7 @@ export function FarmerProvider({ children }) {
    * Called after a successful OTP verification.
    * Adds a new farmer workspace entry (deduplicates by sessionId).
    */
-  const addFarmer = useCallback((email, sessionId) => {
+  const addFarmer = useCallback((email, sessionId, extra = {}) => {
     setActiveFarmers((prev) => {
       // Don't add duplicate sessions
       if (prev.some((f) => f.sessionId === sessionId)) return prev;
@@ -38,6 +38,8 @@ export function FarmerProvider({ children }) {
           email,
           sessionId,
           verifiedAt: new Date().toISOString(),
+          qrToken:      extra.qrToken      ?? null,
+          appLinkStatus: extra.appLinkStatus ?? 'pending_app_install',
         },
       ];
     });
@@ -58,14 +60,24 @@ export function FarmerProvider({ children }) {
     [activeFarmers]
   );
 
+  /**
+   * Update fields on an existing farmer entry (e.g. appLinkStatus after QR scan).
+   */
+  const updateFarmer = useCallback((sessionId, patch) => {
+    setActiveFarmers((prev) =>
+      prev.map((f) => (f.sessionId === sessionId ? { ...f, ...patch } : f))
+    );
+  }, []);
+
   const value = useMemo(
     () => ({
       activeFarmers,
       addFarmer,
       removeFarmer,
       getFarmer,
+      updateFarmer,
     }),
-    [activeFarmers, addFarmer, removeFarmer, getFarmer]
+    [activeFarmers, addFarmer, removeFarmer, getFarmer, updateFarmer]
   );
 
   return <FarmerContext.Provider value={value}>{children}</FarmerContext.Provider>;

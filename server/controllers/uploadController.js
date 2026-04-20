@@ -40,9 +40,20 @@ exports.uploadImage = async (req, res) => {
     session.status = 'processing';
     await session.save();
 
-    const farmer = farmerId
+    let farmer = farmerId
       ? await Farmer.findOne({ farmerId })
       : await Farmer.findOne({ email: session.farmerEmail });
+
+    // If the mobile app verified OTP directly in MongoDB, no Farmer doc was created.
+    // Auto-create one now so uploads aren't blocked.
+    if (!farmer && session.farmerEmail) {
+      farmer = await Farmer.create({
+        farmerId:   `FARM-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+        email:      session.farmerEmail,
+        isVerified: true,
+      });
+      console.log(`[UPLOAD] Auto-created Farmer for ${session.farmerEmail} (app-verified session)`);
+    }
 
     if (!farmer) {
       return res.status(400).json({ error: 'Farmer not found for this session. Re-verify OTP.' });
@@ -57,13 +68,19 @@ exports.uploadImage = async (req, res) => {
 
     // Create a fresh AnalysisSession with the verified GPS base coordinates
     await AnalysisSession.create({
-      sessionId: uploadId,
-      farmerId:  farmer._id,
-      imagePath: req.file.path,
+      sessionId:   uploadId,
+      farmerId:    farmer._id,
+      farmerEmail: farmer.email,       // denormalised — enables farmer-scoped queries
+      imagePath:   req.file.path,
       baseLat,
       baseLon,
       gpsSource,
-      diseases:  []
+      location: {
+        type:        'Point',
+        coordinates: [Number(baseLon), Number(baseLat)],
+      },
+      isVerified: false,
+      diseases:   []
     });
 
     console.log(`[UPLOAD] uploadId=${uploadId.slice(0, 8)} farmer=${farmer.email}`);

@@ -146,7 +146,7 @@ export default function HistoryPage() {
                   </td>
 
                   <td className="px-4 py-3 text-gray-700">
-                    {row.farmerId?.email || <span className="text-gray-400">—</span>}
+                    {row.farmerId?.email || row.farmerEmail || <span className="text-gray-400">—</span>}
                   </td>
 
                   <td className="px-4 py-3">
@@ -156,9 +156,13 @@ export default function HistoryPage() {
                   </td>
 
                   <td className="px-4 py-3">
-                    {row.imagePath ? (
+                    {(row.imageUrl || row.imagePath) ? (
                       <img
-                        src={`http://localhost:5000/${row.imagePath.replace(/\\/g, '/')}`}
+                        src={
+                          row.imageUrl
+                            ? row.imageUrl
+                            : `http://localhost:5000/${row.imagePath.replace(/\\/g, '/')}`
+                        }
                         alt="scan"
                         className="h-14 w-20 rounded-lg border border-gray-200 object-cover"
                         onError={(e) => { e.currentTarget.style.display = 'none'; }}

@@ -1,13 +1,12 @@
 /**
  * Dynamic Spatial Clustering Engine (USP)
  * 
- * Replaces the old 5km-radius heatmap circles with precision agriculture:
- * 1. Fetches all high/severe detections for a sessionId
- * 2. Clusters nearby coordinates (within ~100m)
- * 3. Calculates tight bounding boxes around infection zones
- * 4. Expands with a humidity-driven quarantine perimeter
+ * Reads from AnalysisSession (primary — covers single + batch uploads)
+ * and merges with ScanSession.results + live in-memory alerts.
+ *
+ * FIX: Always resolves farmer email first so ALL uploads for that farmer
+ *      are included — single uploads, batch uploads, multiple batches.
  */
-const ScanSession = require('../models/ScanSession');
 
 // ── Haversine distance in meters ──
 function haversineMeters(lat1, lon1, lat2, lon2) {
@@ -91,74 +90,107 @@ function expandBounds(bounds, bufferMeters) {
 /**
  * GET /api/clusters/:sessionId
  * Returns adaptive spatial clusters for a farmer workspace.
+ *
+ * Strategy (in order of priority):
+ *   1. If ?email= provided → query ALL AnalysisSessions for that email (fastest)
+ *   2. Try direct match: sessionId OR batchId on AnalysisSession
+ *   3. Resolve farmerEmail from ScanSession → query by email
+ *   4. Resolve farmerEmail from AnalysisSession → query by email
  */
 exports.getSessionClusters = async (req, res) => {
   try {
     const { sessionId } = req.params;
+    const { email: queryEmail } = req.query;
+
     if (!sessionId) {
       return res.status(400).json({ error: 'sessionId is required' });
     }
 
-    // 1. Fetch session results
-    const session = await ScanSession.findOne({ sessionId });
-    const results = session?.results || [];
+    const AnalysisSession = require('../models/AnalysisSession');
+    const ScanSession = require('../models/ScanSession');
 
-    // Also merge in-memory alerts if available
-    // (provided via req.app for live C++ engine data)
-    let liveAlerts = [];
-    try {
-      const alertsRes = await fetch(`http://localhost:${process.env.PORT || 5000}/api/alerts?sessionId=${sessionId}`);
-      liveAlerts = await alertsRes.json();
-    } catch {
-      // In-memory alerts endpoint not reachable, skip
+    let sessionsToUse = [];
+
+    // ── Strategy 1: Direct email lookup (fastest, used by FarmerWorkspace) ──
+    if (queryEmail) {
+      const normalizedEmail = String(queryEmail).trim().toLowerCase();
+      sessionsToUse = await AnalysisSession.find({ farmerEmail: normalizedEmail }).lean();
+      console.log(`[CLUSTER] By email=${normalizedEmail} → ${sessionsToUse.length} sessions`);
     }
 
-    // Combine both sources, normalize to {lat, lon, disease, severity}
+    // ── Strategy 2: Direct sessionId / batchId match ──
+    if (sessionsToUse.length === 0) {
+      sessionsToUse = await AnalysisSession.find({
+        $or: [
+          { sessionId },
+          { batchId: sessionId },
+        ]
+      }).lean();
+      if (sessionsToUse.length > 0) {
+        console.log(`[CLUSTER] By sessionId/batchId=${sessionId.slice(0, 8)} → ${sessionsToUse.length} sessions`);
+      }
+    }
+
+    // ── Strategy 3: Resolve email via ScanSession → query by email ──
+    if (sessionsToUse.length === 0) {
+      const scan = await ScanSession.findOne({ sessionId });
+      if (scan?.farmerEmail) {
+        sessionsToUse = await AnalysisSession.find({
+          farmerEmail: scan.farmerEmail,
+        }).lean();
+        console.log(`[CLUSTER] By ScanSession email=${scan.farmerEmail} → ${sessionsToUse.length} sessions`);
+      }
+    }
+
+    // ── Strategy 4: Resolve email from any AnalysisSession that references this farmer ──
+    if (sessionsToUse.length === 0) {
+      const single = await AnalysisSession.findOne({ sessionId }).lean();
+      if (single?.farmerEmail) {
+        sessionsToUse = await AnalysisSession.find({
+          farmerEmail: single.farmerEmail,
+        }).lean();
+        console.log(`[CLUSTER] By AnalysisSession email=${single.farmerEmail} → ${sessionsToUse.length} sessions`);
+      }
+    }
+
+    // ── Also read ScanSession.results for backward compat ──
+    const scanSession = await ScanSession.findOne({ sessionId });
+    const scanResults = scanSession?.results || [];
+
+    // ── Merge all sources into a flat detection list ──
     const allDetections = [];
+    const SAFE_NAMES = ['healthy field / no anomalies found', 'no disease detected / invalid image'];
 
-    for (const r of results) {
-      allDetections.push({
-        lat: r.lat,
-        lon: r.long || r.lon,
-        disease: r.disease,
-        severity: r.severity,
-      });
-    }
-
-    for (const a of (Array.isArray(liveAlerts) ? liveAlerts : [])) {
-      // Avoid duplicates by approximate coordinates
-      const isDupe = allDetections.some(
-        (d) => Math.abs(d.lat - a.lat) < 0.00001 && Math.abs(d.lon - (a.long || a.lon)) < 0.00001
-      );
-      if (!isDupe) {
+    // From AnalysisSession diseases
+    for (const s of sessionsToUse) {
+      for (const d of (s.diseases || [])) {
+        const sev  = (d.severity || '').toLowerCase();
+        const name = (d.name || '').toLowerCase();
+        if (sev === 'safe' || SAFE_NAMES.some(n => name.includes(n))) continue;
+        if (!d.lat || !d.lon) continue;
         allDetections.push({
-          lat: a.lat,
-          lon: a.long || a.lon,
-          disease: a.disease,
-          severity: a.severity,
+          lat:      Number(d.lat),
+          lon:      Number(d.lon),
+          disease:  d.name,
+          severity: d.severity,
         });
       }
     }
 
-    // 2. Filter to high/severe only for clustering
-    const highSevere = allDetections.filter((d) =>
-      ['high', 'severe'].includes(String(d.severity || '').toLowerCase())
-    );
-
-    // If no high/severe, cluster everything
-    const toCluster = highSevere.length > 0 ? highSevere : allDetections;
-
-    if (toCluster.length === 0) {
-      return res.status(200).json({
-        sessionId,
-        humidity: null,
-        humidityBufferMeters: 0,
-        clusters: [],
-        totalDetections: 0,
-      });
+    // From ScanSession.results (dedup)
+    for (const r of scanResults) {
+      if (!r.lat || !r.long) continue;
+      const isDupe = allDetections.some(d =>
+        Math.abs(d.lat - r.lat) < 0.00001 && Math.abs(d.lon - r.long) < 0.00001
+      );
+      if (!isDupe) allDetections.push({ lat: Number(r.lat), lon: Number(r.long), disease: r.disease, severity: r.severity });
     }
 
-    // 3. Fetch live humidity from Open-Meteo (Pune)
+    if (allDetections.length === 0) {
+      return res.status(200).json({ sessionId, humidity: null, humidityBufferMeters: 0, clusters: [], totalDetections: 0 });
+    }
+
+    // ── Fetch live humidity from Open-Meteo (Pune) ──
     let humidity = 50; // default fallback
     try {
       const weatherRes = await fetch(
@@ -170,15 +202,19 @@ exports.getSessionClusters = async (req, res) => {
       // Use fallback
     }
 
-    // 4. Calculate humidity-driven quarantine buffer
-    // Higher humidity = faster disease spread = wider perimeter
-    // Base: 50m, scales up to 200m at 100% humidity
+    // ── Calculate humidity-driven quarantine buffer ──
     const humidityBufferMeters = Math.round(50 + (humidity / 100) * 150);
 
-    // 5. Cluster the detections
+    // ── Filter to high/severe for clustering, fallback to all ──
+    const highSevere = allDetections.filter(d =>
+      ['high', 'severe'].includes(String(d.severity || '').toLowerCase())
+    );
+    const toCluster = highSevere.length > 0 ? highSevere : allDetections;
+
+    // ── Cluster the detections ──
     const rawClusters = clusterPoints(toCluster, 100);
 
-    // 6. Build cluster response objects
+    // ── Build cluster response objects ──
     const clusters = rawClusters.map((cluster, idx) => {
       const infectionBounds = getBoundingBox(cluster);
       const quarantineBounds = expandBounds(infectionBounds, humidityBufferMeters);

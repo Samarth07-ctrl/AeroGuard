@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { MapContainer, Marker, Popup, Rectangle, TileLayer, Tooltip, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { Activity, Droplets, MapPin, Shield } from 'lucide-react';
+import { Activity, Droplets, MapPin, RefreshCw, Shield } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
 const PUNE_LAT = 18.5204;
@@ -50,77 +50,100 @@ export default function MapPage() {
   const [totalDetections, setTotalDetections] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [lastRefresh, setLastRefresh] = useState(Date.now());
 
-  useEffect(() => {
-    const run = async () => {
-      setLoading(true);
-      try {
-        // Fetch all analysis sessions to get every unique sessionId
-        const sessionsRes = await fetch(`${API}/analysis-sessions`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem('adminToken') || ''}` },
+  const loadClusters = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const sessionsRes = await fetch(`${API}/analysis-sessions`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('adminToken') || ''}` },
+      });
+      const sessions = await sessionsRes.json();
+
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        setClusters([]);
+        setLoading(false);
+        return;
+      }
+
+      // Group sessions by farmerEmail to avoid duplicate cluster requests
+      const farmerMap = {};
+      for (const s of sessions) {
+        const diseases = s.diseases || [];
+        const hasReal = diseases.some((d) => {
+          const sev  = (d.severity || '').toLowerCase();
+          const name = (d.name || '').toLowerCase();
+          return sev !== 'safe' &&
+            !name.includes('healthy field') &&
+            !name.includes('no disease') &&
+            !name.includes('no anomalies');
         });
-        const sessions = await sessionsRes.json();
+        if (!hasReal) continue;
 
-        if (!Array.isArray(sessions) || sessions.length === 0) {
-          setLoading(false);
-          return;
+        const email = s.farmerEmail || s.farmerId?.email || '';
+        if (!email) continue;
+        if (!farmerMap[email]) {
+          farmerMap[email] = s.sessionId; // use one sessionId per farmer for the request
         }
+      }
 
-        // Get unique sessionIds — skip sessions that are purely "Healthy Field" sentinels
-        const sessionIds = [...new Set(
-          sessions
-            .filter((s) => {
-              const diseases = s.diseases || [];
-              // Exclude sessions where every disease is a safe sentinel
-              const hasRealDisease = diseases.some((d) => {
-                const sev = (d.severity || '').toLowerCase();
-                const name = (d.name || '').toLowerCase();
-                return sev !== 'safe' &&
-                  !name.includes('healthy field') &&
-                  !name.includes('no disease') &&
-                  !name.includes('no anomalies');
-              });
-              return hasRealDisease;
-            })
-            .map((s) => s.sessionId)
-            .filter(Boolean)
-        )];
+      const uniqueFarmers = Object.entries(farmerMap);
+      if (uniqueFarmers.length === 0) {
+        setClusters([]);
+        setLoading(false);
+        return;
+      }
 
-        // Fetch clusters for each session in parallel
-        const results = await Promise.allSettled(
-          sessionIds.map((sid) =>
-            fetch(`${API}/clusters/${sid}`).then((r) => r.json())
-          )
-        );
+      const results = await Promise.allSettled(
+        uniqueFarmers.map(([email, sid]) =>
+          fetch(`${API}/clusters/${sid}?email=${encodeURIComponent(email)}`).then((r) => r.json())
+        )
+      );
 
-        let allClusters = [];
-        let latestHumidity = null;
-        let latestBuffer = null;
-        let detectionCount = 0;
+      let allClusters = [];
+      let latestHumidity = null;
+      let latestBuffer = null;
+      let detectionCount = 0;
 
-        for (const result of results) {
-          if (result.status === 'fulfilled' && result.value?.clusters) {
-            allClusters = allClusters.concat(result.value.clusters);
-            detectionCount += result.value.totalDetections || 0;
-            if (latestHumidity === null) {
-              latestHumidity = result.value.humidity;
-              latestBuffer = result.value.humidityBufferMeters;
-            }
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value?.clusters) {
+          allClusters = allClusters.concat(result.value.clusters);
+          detectionCount += result.value.totalDetections || 0;
+          if (latestHumidity === null) {
+            latestHumidity = result.value.humidity;
+            latestBuffer = result.value.humidityBufferMeters;
           }
         }
-
-        setClusters(allClusters);
-        setHumidity(latestHumidity);
-        setHumidityBuffer(latestBuffer);
-        setTotalDetections(detectionCount);
-      } catch (err) {
-        setError('Failed to load global cluster data');
-        console.error(err);
-      } finally {
-        setLoading(false);
       }
+
+      setClusters(allClusters);
+      setHumidity(latestHumidity);
+      setHumidityBuffer(latestBuffer);
+      setTotalDetections(detectionCount);
+    } catch (err) {
+      setError('Failed to load global cluster data');
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Load on mount and whenever lastRefresh changes
+  useEffect(() => {
+    loadClusters();
+  }, [loadClusters, lastRefresh]);
+
+  // Auto-refresh every 30s so batch results appear without manual reload
+  useEffect(() => {
+    const iv = setInterval(() => setLastRefresh(Date.now()), 30000);
+    // Also refresh immediately when any batch completes (cross-component event)
+    const onBatchComplete = () => setLastRefresh(Date.now());
+    window.addEventListener('aeroguard:batch-complete', onBatchComplete);
+    return () => {
+      clearInterval(iv);
+      window.removeEventListener('aeroguard:batch-complete', onBatchComplete);
     };
-    run();
   }, []);
 
   return (
@@ -158,6 +181,14 @@ export default function MapPage() {
             Loading clusters…
           </div>
         )}
+        <button
+          onClick={() => setLastRefresh(Date.now())}
+          disabled={loading}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition"
+        >
+          <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+          Refresh
+        </button>
       </div>
 
       {error && (

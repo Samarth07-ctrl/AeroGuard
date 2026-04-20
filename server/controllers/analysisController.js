@@ -19,6 +19,59 @@ exports.getAllAnalysisSessions = async (_req, res) => {
   }
 };
 
+// ── GET /api/analysis-sessions/farmer/:email ──────────────────────────────
+// Returns all analysis sessions for a specific farmer by email
+exports.getFarmerAnalysisSessions = async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    
+    const sessions = await AnalysisSession.find({ farmerEmail: normalizedEmail })
+      .sort({ createdAt: -1 })
+      .populate('farmerId', 'farmerId email')
+      .lean();
+
+    console.log(`[ANALYSIS] Farmer ${normalizedEmail} has ${sessions.length} sessions`);
+    return res.status(200).json(sessions);
+  } catch (error) {
+    console.error('[ANALYSIS] farmer fetch error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ── GET /api/analysis-sessions/session/:sessionId ────────────────────────
+// Returns all analysis sessions linked to an OTP sessionId (via farmerId lookup)
+exports.getSessionAnalysisSessions = async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    if (!sessionId) return res.status(400).json({ error: 'Session ID is required' });
+
+    // Find the ScanSession to get the farmer email
+    const ScanSession = require('../models/ScanSession');
+    const scanSession = await ScanSession.findOne({ sessionId });
+    
+    if (!scanSession) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const normalizedEmail = String(scanSession.farmerEmail).trim().toLowerCase();
+    
+    // Find all analysis sessions for this farmer
+    const sessions = await AnalysisSession.find({ farmerEmail: normalizedEmail })
+      .sort({ createdAt: -1 })
+      .populate('farmerId', 'farmerId email')
+      .lean();
+
+    console.log(`[ANALYSIS] Session ${sessionId.slice(0, 8)} (farmer: ${normalizedEmail}) has ${sessions.length} analysis sessions`);
+    return res.status(200).json(sessions);
+  } catch (error) {
+    console.error('[ANALYSIS] session fetch error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 exports.getMapData = async (_req, res) => {
   try {
     const sessions = await AnalysisSession.find()
